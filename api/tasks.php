@@ -1,27 +1,67 @@
 <?php
 // backend/api/tasks.php
 
-// 設定 CORS 允許跨域請求
 header('Access-Control-Allow-Origin: *');
 header('Access-Control-Allow-Methods: GET, POST, PUT, DELETE, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 header('Content-Type: application/json');
 
-// 處理 OPTIONS 請求（預檢請求）
+// 處理 OPTIONS 請求
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
 
-// 資料檔案路徑
+// ============ 設定檔案路徑 ============
 $dataFile = __DIR__ . '/../data/tasks.json';
+$logDir = __DIR__ . '/../logs';
+$logFile = $logDir . '/tasks.log';
+
+// 確保 log 目錄存在
+if (!file_exists($logDir)) {
+    mkdir($logDir, 0755, true);
+}
+
+// ============ Log 函數 ============
+function writeLog($filePath, $message, $data = null) {
+    $timestamp = date('Y-m-d H:i:s');
+    $ip = $_SERVER['REMOTE_ADDR'] ?? 'unknown';
+    $method = $_SERVER['REQUEST_METHOD'] ?? 'unknown';
+    $uri = $_SERVER['REQUEST_URI'] ?? 'unknown';
+    
+    $logEntry = [
+        'timestamp' => $timestamp,
+        'ip' => $ip,
+        'method' => $method,
+        'uri' => $uri,
+        'message' => $message,
+        'data' => $data
+    ];
+    
+    // 格式化的 log 行
+    $logLine = sprintf(
+        "[%s] [%s] [%s] %s - %s%s",
+        $timestamp,
+        $ip,
+        $method,
+        $uri,
+        $message,
+        $data ? ' | Data: ' . json_encode($data, JSON_UNESCAPED_UNICODE) : ''
+    );
+    
+    // 寫入檔案（附加模式）
+    file_put_contents($filePath, $logLine . PHP_EOL, FILE_APPEND);
+    
+    return $logEntry;
+}
+
+function writeErrorLog($filePath, $error, $context = null) {
+    return writeLog($filePath, 'ERROR: ' . $error, $context);
+}
 
 // ============ 工具函數 ============
-
-// 讀取資料
 function readTasks($filePath) {
     if (!file_exists($filePath)) {
-        // 如果檔案不存在，創建空資料
         file_put_contents($filePath, json_encode(['tasks' => [], 'lastId' => 0]));
         return ['tasks' => [], 'lastId' => 0];
     }
@@ -30,25 +70,26 @@ function readTasks($filePath) {
     $data = json_decode($content, true);
     
     if (!$data) {
+        writeLog(__DIR__ . '/../logs/tasks.log', 'JSON 解析失敗', ['content' => $content]);
         return ['tasks' => [], 'lastId' => 0];
     }
     
     return $data;
 }
 
-// 寫入資料
 function writeTasks($filePath, $data) {
-    return file_put_contents($filePath, json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE));
+    return file_put_contents(
+        $filePath, 
+        json_encode($data, JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
+    );
 }
 
-// 生成新 ID
 function generateId($data) {
     $data['lastId'] = ($data['lastId'] ?? 0) + 1;
     return $data['lastId'];
 }
 
-// ============ 處理請求 ============
-
+// ============ 主要邏輯 ============
 $method = $_SERVER['REQUEST_METHOD'];
 $data = readTasks($dataFile);
 
@@ -60,12 +101,22 @@ if (!isset($data['lastId'])) {
     $data['lastId'] = 0;
 }
 
-// 解析請求體（針對 POST, PUT, DELETE）
+// 解析請求體
 $input = json_decode(file_get_contents('php://input'), true);
 
+// 記錄請求
+writeLog($logFile, '收到請求', [
+    'method' => $method,
+    'input' => $input
+]);
+
+// ============ 處理請求 ============
 switch ($method) {
     case 'GET':
-        // 取得所有任務
+        writeLog($logFile, 'GET 請求 - 回傳所有任務', [
+            'total' => count($data['tasks'])
+        ]);
+        
         echo json_encode([
             'success' => true,
             'data' => $data['tasks'],
@@ -74,16 +125,18 @@ switch ($method) {
         break;
 
     case 'POST':
-        // 新增或更新任務
         if (!$input) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => '無效的請求資料']);
+            $errorMsg = '無效的請求資料（無法解析 JSON）';
+            writeErrorLog($logFile, $errorMsg, ['raw_input' => file_get_contents('php://input')]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
             break;
         }
 
-        // 如果是從前端來的完整 tasks 陣列（批量更新）
+        // 批量更新（從前端傳入完整 tasks 陣列）
         if (isset($input['tasks'])) {
             $data['tasks'] = $input['tasks'];
+            
             // 更新 lastId
             $maxId = 0;
             foreach ($data['tasks'] as $task) {
@@ -93,6 +146,11 @@ switch ($method) {
             }
             $data['lastId'] = $maxId;
             
+            writeLog($logFile, 'POST 請求 - 批量更新任務', [
+                'task_count' => count($data['tasks']),
+                'last_id' => $data['lastId']
+            ]);
+            
             if (writeTasks($dataFile, $data)) {
                 echo json_encode([
                     'success' => true,
@@ -101,7 +159,9 @@ switch ($method) {
                 ]);
             } else {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => '儲存失敗']);
+                $errorMsg = '寫入檔案失敗';
+                writeErrorLog($logFile, $errorMsg, ['file' => $dataFile]);
+                echo json_encode(['success' => false, 'message' => $errorMsg]);
             }
             break;
         }
@@ -109,10 +169,13 @@ switch ($method) {
         // 單個任務新增
         if (isset($input['task'])) {
             $newTask = $input['task'];
-            // 確保必要欄位存在
+            
+            // 驗證必要欄位
             if (!isset($newTask['text']) || empty($newTask['text'])) {
                 http_response_code(400);
-                echo json_encode(['success' => false, 'message' => '任務內容不能為空']);
+                $errorMsg = '任務內容不能為空';
+                writeErrorLog($logFile, $errorMsg, ['task' => $newTask]);
+                echo json_encode(['success' => false, 'message' => $errorMsg]);
                 break;
             }
             
@@ -133,6 +196,12 @@ switch ($method) {
             
             $data['tasks'][] = $newTask;
             
+            writeLog($logFile, 'POST 請求 - 新增單個任務', [
+                'task_id' => $newId,
+                'task_text' => $newTask['text'],
+                'tag' => $newTask['tag']
+            ]);
+            
             if (writeTasks($dataFile, $data)) {
                 echo json_encode([
                     'success' => true,
@@ -141,30 +210,47 @@ switch ($method) {
                 ]);
             } else {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => '儲存失敗']);
+                $errorMsg = '寫入檔案失敗';
+                writeErrorLog($logFile, $errorMsg, ['file' => $dataFile]);
+                echo json_encode(['success' => false, 'message' => $errorMsg]);
             }
             break;
         }
 
         http_response_code(400);
-        echo json_encode(['success' => false, 'message' => '無效的請求資料']);
+        $errorMsg = '無效的請求格式';
+        writeErrorLog($logFile, $errorMsg, ['input' => $input]);
+        echo json_encode(['success' => false, 'message' => $errorMsg]);
         break;
 
     case 'PUT':
-        // 更新特定任務
         if (!$input || !isset($input['task'])) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => '無效的請求資料']);
+            $errorMsg = 'PUT 請求缺少 task 資料';
+            writeErrorLog($logFile, $errorMsg, ['input' => $input]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
             break;
         }
 
         $updatedTask = $input['task'];
         $found = false;
         
+        if (!isset($updatedTask['id'])) {
+            http_response_code(400);
+            $errorMsg = 'PUT 請求缺少任務 ID';
+            writeErrorLog($logFile, $errorMsg, ['task' => $updatedTask]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
+            break;
+        }
+        
         foreach ($data['tasks'] as &$task) {
             if ($task['id'] == $updatedTask['id']) {
                 $task = array_merge($task, $updatedTask);
                 $found = true;
+                writeLog($logFile, 'PUT 請求 - 更新任務', [
+                    'task_id' => $updatedTask['id'],
+                    'updates' => $updatedTask
+                ]);
                 break;
             }
         }
@@ -178,19 +264,24 @@ switch ($method) {
                 ]);
             } else {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => '儲存失敗']);
+                $errorMsg = '寫入檔案失敗';
+                writeErrorLog($logFile, $errorMsg, ['file' => $dataFile]);
+                echo json_encode(['success' => false, 'message' => $errorMsg]);
             }
         } else {
             http_response_code(404);
-            echo json_encode(['success' => false, 'message' => '找不到該任務']);
+            $errorMsg = "找不到 ID {$updatedTask['id']} 的任務";
+            writeErrorLog($logFile, $errorMsg, ['task_id' => $updatedTask['id']]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
         }
         break;
 
     case 'DELETE':
-        // 刪除特定任務
         if (!$input || !isset($input['id'])) {
             http_response_code(400);
-            echo json_encode(['success' => false, 'message' => '請提供任務 ID']);
+            $errorMsg = 'DELETE 請求缺少任務 ID';
+            writeErrorLog($logFile, $errorMsg, ['input' => $input]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
             break;
         }
 
@@ -201,12 +292,15 @@ switch ($method) {
             if ($task['id'] == $deleteId) {
                 unset($data['tasks'][$key]);
                 $found = true;
+                writeLog($logFile, 'DELETE 請求 - 刪除任務', [
+                    'task_id' => $deleteId,
+                    'task_text' => $task['text'] ?? 'unknown'
+                ]);
                 break;
             }
         }
         
         if ($found) {
-            // 重新索引陣列
             $data['tasks'] = array_values($data['tasks']);
             
             if (writeTasks($dataFile, $data)) {
@@ -216,17 +310,23 @@ switch ($method) {
                 ]);
             } else {
                 http_response_code(500);
-                echo json_encode(['success' => false, 'message' => '儲存失敗']);
+                $errorMsg = '寫入檔案失敗';
+                writeErrorLog($logFile, $errorMsg, ['file' => $dataFile]);
+                echo json_encode(['success' => false, 'message' => $errorMsg]);
             }
         } else {
             http_response_code(404);
-            echo json_encode(['success' => false, 'message' => '找不到該任務']);
+            $errorMsg = "找不到 ID {$deleteId} 的任務";
+            writeErrorLog($logFile, $errorMsg, ['task_id' => $deleteId]);
+            echo json_encode(['success' => false, 'message' => $errorMsg]);
         }
         break;
 
     default:
         http_response_code(405);
-        echo json_encode(['success' => false, 'message' => '不支援的請求方法']);
+        $errorMsg = "不支援的請求方法: {$method}";
+        writeErrorLog($logFile, $errorMsg);
+        echo json_encode(['success' => false, 'message' => $errorMsg]);
         break;
 }
 ?>
