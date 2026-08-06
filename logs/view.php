@@ -1,5 +1,4 @@
 <?php
-// backend/logs/view.php
 
 header('Content-Type: text/html; charset=utf-8');
 
@@ -13,7 +12,6 @@ if (!file_exists($logFile)) {
 $content = file_get_contents($logFile);
 $lines = array_reverse(explode(PHP_EOL, $content));
 
-// 過濾空行
 $lines = array_filter($lines, function($line) {
     return trim($line) !== '';
 });

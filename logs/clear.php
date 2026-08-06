@@ -1,5 +1,4 @@
 <?php
-// backend/logs/clear.php
 
 header('Content-Type: application/json');
 
