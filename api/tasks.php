@@ -13,7 +13,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 // ============ 設定檔案路徑 ============
+$dataDir = __DIR__ . '/../data';
 $dataFile = __DIR__ . '/../data/tasks.json';
+
+if (!file_exists($dataDir)) {
+    mkdir($dataDir, 0755, true);
+}
+
 $logDir = __DIR__ . '/../logs';
 $logFile = $logDir . '/tasks.log';
 
